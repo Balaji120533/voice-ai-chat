@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Voice AI Chat</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Reset ── */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    /* ── CSS Variables ── */
+    :root {
+      --bg:               #0e0e0e;
+      --divider:          #1f1f1f;
+      --user-bubble-bg:   #1a1a1a;
+      --user-bubble-border: #2a2a2a;
+      --ai-text:          #c8c8c8;
+      --user-text:        #f0f0f0;
+      --accent:           #8b5cf6;
+      --interim-text:     #444444;
+      --status-active:    #4ade80;
+      --status-error:     #f87171;
+      --status-default:   #4b4b4b;
+      --title:            #ffffff;
+    }
+
+    /* ── Base ── */
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--user-text);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    /* ── App wrapper ── */
+    .app {
+      width: 100%;
+      max-width: 640px;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ── Header ── */
+    header {
+      flex-shrink: 0;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--divider);
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+
+    h1 {
+      font-size: 0.95rem;
+      font-weight: 500;
+      letter-spacing: 0.5px;
+      color: var(--title);
+      text-transform: uppercase;
+    }
+
+    .subtitle {
+      font-size: 0.72rem;
+      color: var(--status-default);
+      font-weight: 400;
+    }
+
+    /* ── Chat window ── */
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 20px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      scroll-behavior: smooth;
+    }
+
+    /* ── Scrollbar ── */
+    #chat::-webkit-scrollbar { width: 3px; }
+    #chat::-webkit-scrollbar-track { background: transparent; }
+    #chat::-webkit-scrollbar-thumb {
+      background: #2a2a2a;
+    }
+
+    /* ── Bubble entry animation ── */
+    @keyframes bubbleIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Chat Bubbles ── */
+    .bubble {
+      max-width: 75%;
+      font-size: 0.9rem;
+      line-height: 1.65;
+      word-break: break-word;
+      white-space: pre-wrap;
+      animation: bubbleIn 150ms ease-out both;
+    }
+
+    /* User bubble */
+    .bubble.user {
+      align-self: flex-end;
+      background: var(--user-bubble-bg);
+      border: 1px solid var(--user-bubble-border);
+      border-radius: 10px;
+      border-bottom-right-radius: 3px;
+      color: var(--user-text);
+      padding: 10px 14px;
+    }
+
+    /* AI bubble wrapper */
+    .bubble.ai {
+      align-self: flex-start;
+      display: flex;
+      align-items: flex-start;
+      background: transparent;
+      border: none;
+      padding: 0;
+      max-width: 80%;
+    }
+
+    /* AI avatar — hidden visually but kept in DOM for JS compat */
+    .ai-avatar {
+      display: none;
+    }
+
+    /* AI content: left accent border only */
+    .ai-content {
+      border-left: 3px solid var(--accent);
+      padding-left: 12px;
+      color: var(--ai-text);
+      font-size: 0.9rem;
+      line-height: 1.65;
+      word-break: break-word;
+      white-space: pre-wrap;
+      flex: 1;
+    }
+
+    .bubble.ai.streaming .ai-content {
+      border-left-color: var(--accent);
+    }
+
+    /* ── Interim transcript bubble ── */
+    #interim-bubble {
+      align-self: flex-end;
+      max-width: 75%;
+      padding: 8px 12px;
+      font-size: 0.9rem;
+      font-style: italic;
+      color: var(--interim-text);
+      border-bottom: 1px dashed #2a2a2a;
+      display: none;
+    }
+
+    /* ── Typing dots ── */
+    .dots { display: inline-flex; gap: 5px; align-items: center; padding: 4px 0; }
+    .dots span {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--status-default);
+      animation: bounce 1.2s infinite;
+    }
+    .dots span:nth-child(2) { animation-delay: .2s; }
+    .dots span:nth-child(3) { animation-delay: .4s; }
+
+    @keyframes bounce {
+      0%, 80%, 100% { transform: scale(.8); opacity: .5; }
+      40%            { transform: scale(1.1); opacity: 1; }
+    }
+
+    /* ── Bottom bar ── */
+    .bottom {
+      flex-shrink: 0;
+      border-top: 1px solid var(--divider);
+      padding: 14px 20px 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    /* ── Status ── */
+    .status {
+      font-size: 0.75rem;
+      font-weight: 400;
+      color: var(--status-default);
+      min-height: 16px;
+      text-align: center;
+    }
+    .status.active  { color: var(--status-active); }
+    .status.loading { color: var(--status-default); }
+    .status.error   { color: var(--status-error); }
+
+    /* ── Mic wrapper ── */
+    .mic-wrapper {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 60px;
+      height: 60px;
+    }
+
+    /* Pulse rings — kept for JS class compat, but styled minimally */
+    .mic-ring {
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      border: 1px solid rgba(139, 92, 246, 0.2);
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .listening-active .mic-ring:nth-child(1) {
+      animation: ringPulse 2s ease-out 0s infinite;
+    }
+    .listening-active .mic-ring:nth-child(2) {
+      animation: ringPulse 2s ease-out 0.5s infinite;
+    }
+    .listening-active .mic-ring:nth-child(3) {
+      animation: ringPulse 2s ease-out 1s infinite;
+    }
+
+    @keyframes ringPulse {
+      0%   { transform: scale(1);   opacity: 0.6; }
+      100% { transform: scale(2);   opacity: 0; }
+    }
+
+    /* ── Mic Button ── */
+    .mic-btn {
+      position: relative;
+      z-index: 1;
+      width: 52px;
+      height: 52px;
+      border-radius: 50%;
+      border: 1px solid #2a2a2a;
+      background: transparent;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 1.2rem;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+      outline: none;
+    }
+
+    .mic-btn:hover:not(:disabled) {
+      border-color: var(--accent);
+    }
+
+    .mic-btn:focus-visible {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.3);
+    }
+
+    .mic-btn:active:not(:disabled) {
+      opacity: 0.8;
+    }
+
+    .mic-btn.listening {
+      border-color: var(--accent);
+      color: var(--accent);
+      box-shadow: 0 0 0 6px rgba(139, 92, 246, 0.15);
+    }
+
+    .mic-btn:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 480px) {
+      header { padding: 12px 16px; }
+      #chat { padding: 16px 16px 10px; }
+      .bottom { padding: 12px 16px 18px; }
+      .bubble.user,
+      .bubble.ai { max-width: 88%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Voice AI Chat</h1>
+    </header>
+
+    <div id="chat">
+      <div class="bubble ai">
+        <div class="ai-avatar">🤖</div>
+        <div class="ai-content">Hi! Press the mic button and start speaking. I'll reply to whatever you say.</div>
+      </div>
+      <div id="interim-bubble"></div>
+    </div>
+
+    <div class="bottom">
+      <p class="status" id="status">Click the mic to start</p>
+      <div class="mic-wrapper" id="micWrapper">
+        <div class="mic-ring"></div>
+        <div class="mic-ring"></div>
+        <div class="mic-ring"></div>
+        <button class="mic-btn" id="micBtn" title="Start / Stop recording">🎙️</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  const WORKLET_CODE = `
+class PcmCapture extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) {
+      const pcm = new Int16Array(ch.length);
+      for (let i = 0; i < ch.length; i++)
+        pcm[i] = Math.max(-32768, Math.min(32767, ch[i] * 32768));
+      this.port.postMessage(pcm.buffer, [pcm.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor('pcm-capture', PcmCapture);
+`;
+
+  (function () {
+    const SAMPLE_RATE = 16000;
+
+    const chatEl    = document.getElementById('chat');
+    const micBtn    = document.getElementById('micBtn');
+    const statusEl  = document.getElementById('status');
+    const interimEl = document.getElementById('interim-bubble');
+
+    let ws           = null;
+    let audioCtx     = null;
+    let workletNode  = null;
+    let micSource    = null;
+    let micStream    = null;
+    let listening    = false;
+    let aiPending    = false;  // true while Ollama is streaming a reply
+    let pendingClose = false;  // close WS after AI done (mic stopped mid-generation)
+    let aiBubble     = null;   // current streaming AI bubble
+
+    /* ── helpers ── */
+    function setStatus(msg, cls) {
+      statusEl.textContent = msg;
+      statusEl.className = 'status' + (cls ? ' ' + cls : '');
+    }
+
+    function scrollDown() {
+      chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    function addBubble(role, text) {
+      const div = document.createElement('div');
+      div.className = 'bubble ' + role;
+      if (role === 'ai') {
+        const avatar = document.createElement('div');
+        avatar.className = 'ai-avatar';
+        avatar.textContent = '🤖';
+        const content = document.createElement('div');
+        content.className = 'ai-content';
+        content.textContent = text;
+        div.appendChild(avatar);
+        div.appendChild(content);
+      } else {
+        div.textContent = text;
+      }
+      chatEl.appendChild(div);
+      scrollDown();
+      return div;
+    }
+
+    function showTyping() {
+      const div = document.createElement('div');
+      div.className = 'bubble ai streaming';
+      const avatar = document.createElement('div');
+      avatar.className = 'ai-avatar';
+      avatar.textContent = '🤖';
+      const content = document.createElement('div');
+      content.className = 'ai-content';
+      content.innerHTML = '<span class="dots"><span></span><span></span><span></span></span>';
+      div.appendChild(avatar);
+      div.appendChild(content);
+      chatEl.appendChild(div);
+      scrollDown();
+      return div;
+    }
+
+    /* ── WebSocket message handler ── */
+    function handleMessage(e) {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+
+      switch (msg.type) {
+        case 'ready':
+          startMic();
+          break;
+
+        case 'user_message':
+          interimEl.style.display = 'none';
+          interimEl.textContent = '';
+          addBubble('user', msg.text);
+          break;
+
+        case 'interim':
+          interimEl.textContent = msg.text;
+          interimEl.style.display = 'block';
+          // Move interim bubble to bottom of chat
+          chatEl.appendChild(interimEl);
+          scrollDown();
+          break;
+
+        case 'ai_start':
+          aiPending = true;
+          aiBubble = showTyping();
+          break;
+
+        case 'ai_chunk':
+          if (aiBubble) {
+            const contentEl = aiBubble.querySelector('.ai-content');
+            if (contentEl) {
+              if (contentEl.querySelector('.dots')) contentEl.innerHTML = '';
+              contentEl.textContent += msg.text;
+            }
+            scrollDown();
+          }
+          break;
+
+        case 'ai_done':
+          aiPending = false;
+          if (aiBubble) {
+            aiBubble.classList.remove('streaming');
+            aiBubble = null;
+          }
+          // Mic was stopped while AI was generating — now safe to close
+          if (pendingClose) {
+            pendingClose = false;
+            if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); ws = null; }
+            micBtn.disabled = false;
+            setStatus('Click the mic to start');
+          }
+          break;
+
+        case 'error':
+          setStatus('Error: ' + msg.message, 'error');
+          stopRecording();
+          break;
+      }
+    }
+
+    /* ── recording ── */
+    async function startRecording() {
+      setStatus('Connecting…', 'loading');
+      micBtn.disabled = true;
+
+      ws = new WebSocket('ws://localhost:3000/ws');
+      ws.binaryType = 'arraybuffer';
+      ws.onmessage = handleMessage;
+
+      ws.onerror = () => {
+        setStatus('WebSocket error — is the server running?', 'error');
+        stopRecording();
+      };
+      ws.onclose = () => {
+        if (listening) { setStatus('Disconnected', 'error'); stopRecording(); }
+      };
+    }
+
+    async function startMic() {
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 }
+        });
+      } catch {
+        setStatus('Microphone denied — allow mic in browser settings.', 'error');
+        stopRecording();
+        return;
+      }
+
+      audioCtx    = new AudioContext({ sampleRate: SAMPLE_RATE });
+      const blob  = new Blob([WORKLET_CODE], { type: 'application/javascript' });
+      const url   = URL.createObjectURL(blob);
+      await audioCtx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+
+      micSource   = audioCtx.createMediaStreamSource(micStream);
+      workletNode = new AudioWorkletNode(audioCtx, 'pcm-capture');
+      workletNode.port.onmessage = (e) => {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(e.data);
+      };
+      micSource.connect(workletNode);
+
+      listening = true;
+      micBtn.disabled = false;
+      micBtn.classList.add('listening');
+      micBtn.textContent = '⏹️';
+      document.getElementById('micWrapper').classList.add('listening-active');
+      setStatus('Listening… speak now', 'active');
+    }
+
+    // Called when user clicks stop — stops audio only, keeps WS open if AI is responding
+    function stopMicOnly() {
+      listening = false;
+
+      if (workletNode) { workletNode.disconnect(); workletNode = null; }
+      if (micSource)   { micSource.disconnect();   micSource   = null; }
+      if (audioCtx)    { audioCtx.close();          audioCtx    = null; }
+      if (micStream)   { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+
+      micBtn.classList.remove('listening');
+      micBtn.textContent = '🎙️';
+      document.getElementById('micWrapper').classList.remove('listening-active');
+
+      // If interim text is showing, send it as a message before stopping
+      const pendingText = interimEl.textContent.trim();
+      interimEl.style.display = 'none';
+      interimEl.textContent = '';
+
+      if (pendingText && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'force_send', text: pendingText }));
+      }
+
+      if (aiPending || pendingText) {
+        // Keep WS open so AI can finish; close after ai_done
+        pendingClose = true;
+        micBtn.disabled = true;
+        setStatus('AI is responding…');
+      } else {
+        if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); ws = null; }
+        micBtn.disabled = false;
+        setStatus('Click the mic to start');
+      }
+    }
+
+    // Full teardown — used on errors and page unload
+    function stopRecording() {
+      listening = false;
+      aiPending = false;
+      pendingClose = false;
+
+      if (workletNode) { workletNode.disconnect(); workletNode = null; }
+      if (micSource)   { micSource.disconnect();   micSource   = null; }
+      if (audioCtx)    { audioCtx.close();          audioCtx    = null; }
+      if (micStream)   { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+      if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); ws = null; }
+
+      micBtn.classList.remove('listening');
+      micBtn.textContent = '🎙️';
+      micBtn.disabled = false;
+      document.getElementById('micWrapper').classList.remove('listening-active');
+      interimEl.style.display = 'none';
+      interimEl.textContent = '';
+      setStatus('Click the mic to start');
+    }
+
+    micBtn.addEventListener('click', () => {
+      if (listening) stopMicOnly(); else startRecording();
+    });
+  })();
+  </script>
+</body>
+</html>
