@@ -54,16 +54,38 @@ const DG_URL =
   '&smart_format=true' +
   '&punctuate=true';
 
+// Encode a uniform [{role, content}] array as TOON for compact LLM context
+function encodeToon(msgs) {
+  const rows = msgs.map(m => {
+    const content = /[,"\n\r]/.test(m.content)
+      ? `"${m.content.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n')}"`
+      : m.content;
+    return `  ${m.role},${content}`;
+  });
+  return `messages[${msgs.length}]{role,content}:\n${rows.join('\n')}`;
+}
+
 // Ask Ollama and stream the reply back to the browser
 function askOllama(clientWs, history, userText) {
   return new Promise((resolve) => {
     try {
       // Convert chat history from Gemini format → Ollama format
-      const messages = history.map(h => ({
+      const ollamaHistory = history.map(h => ({
         role: h.role === 'model' ? 'assistant' : 'user',
         content: h.parts[0].text,
       }));
-      messages.push({ role: 'user', content: userText });
+
+      // If there is prior history, encode it as TOON to reduce context tokens
+      let messages;
+      if (ollamaHistory.length >= 2) {
+        const toon = encodeToon(ollamaHistory);
+        messages = [
+          { role: 'system', content: `Prior conversation history in TOON format (compact JSON encoding):\n\`\`\`toon\n${toon}\n\`\`\`` },
+          { role: 'user', content: userText },
+        ];
+      } else {
+        messages = [...ollamaHistory, { role: 'user', content: userText }];
+      }
 
       const body = JSON.stringify({ model: OLLAMA_MODEL, messages, stream: true });
 

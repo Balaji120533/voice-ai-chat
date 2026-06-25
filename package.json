@@ -5,6 +5,7 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@toon-format/toon": "^2.3.0",
     "ws": "^8.21.0"
   }
 }
