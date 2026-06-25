@@ -288,16 +288,3 @@ const openai = new OpenAI({
 └── package.json
 ```
 
-## Troubleshooting
-
-**"Ollama error" in server logs**
-Run `ollama list` and make sure the model name matches `OLLAMA_MODEL` in `server.js` exactly (e.g. `llama3:8b`, not `llama3.2`). Also confirm Ollama is running at `http://localhost:11434`.
-
-**No transcript appearing**
-Check your Deepgram API key in `.env`. Open the browser console — WebSocket errors will appear there.
-
-**Mic button stays disabled after stopping**
-The AI is still generating a reply. It will re-enable automatically when the response finishes.
-
-**"Microphone denied" error**
-Allow microphone access in your browser's site settings for `localhost:3000`.
