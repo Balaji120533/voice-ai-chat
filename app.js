@@ -28,9 +28,9 @@ registerProcessor('pcm-capture', PcmCapture);
   let micSource    = null;
   let micStream    = null;
   let listening    = false;
-  let aiPending    = false;  // true while Ollama is streaming a reply
-  let pendingClose = false;  // close WS after AI done (mic stopped mid-generation)
-  let aiBubble     = null;   // current streaming AI bubble
+  let aiPending    = false;
+  let pendingClose = false; // close WS after ai_done when mic was stopped mid-generation
+  let aiBubble     = null;
 
   /* ── helpers ── */
   function setStatus(msg, cls) {
@@ -78,6 +78,13 @@ registerProcessor('pcm-capture', PcmCapture);
     return div;
   }
 
+  // Restore mic button to the correct icon based on current state
+  function restoreMicBtn() {
+    micBtn.textContent = listening ? '⏹️' : '🎙️';
+    micBtn.title = 'Start / Stop recording';
+    micBtn.disabled = false;
+  }
+
   /* ── WebSocket message handler ── */
   function handleMessage(e) {
     let msg;
@@ -92,6 +99,7 @@ registerProcessor('pcm-capture', PcmCapture);
         interimEl.style.display = 'none';
         interimEl.textContent = '';
         addBubble('user', msg.text);
+        aiPending = true;  // AI response is on its way — keep WS open if user stops mic
         break;
 
       case 'interim':
@@ -104,6 +112,11 @@ registerProcessor('pcm-capture', PcmCapture);
       case 'ai_start':
         aiPending = true;
         aiBubble = showTyping();
+        // Change mic button to interrupt mode
+        micBtn.textContent = '🛑';
+        micBtn.title = 'Stop AI and speak';
+        micBtn.disabled = false;
+        setStatus('AI is responding… click 🛑 to interrupt', 'loading');
         break;
 
       case 'ai_chunk':
@@ -119,14 +132,33 @@ registerProcessor('pcm-capture', PcmCapture);
 
       case 'ai_done':
         aiPending = false;
-        if (aiBubble) {
-          aiBubble.classList.remove('streaming');
-          aiBubble = null;
-        }
-        // Mic was stopped while AI was generating — now safe to close
+        if (aiBubble) { aiBubble.classList.remove('streaming'); aiBubble = null; }
         if (pendingClose) {
+          // Mic was stopped while AI was generating — close session now
           pendingClose = false;
           if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); ws = null; }
+          setStatus('Click the mic to start');
+        } else {
+          setStatus(listening ? 'Listening… speak now' : 'Click the mic to start', listening ? 'active' : '');
+        }
+        restoreMicBtn();
+        break;
+
+      case 'ai_stopped':
+        // User interrupted — discard partial bubble and resume listening
+        aiPending = false;
+        pendingClose = false;
+        if (aiBubble) { aiBubble.remove(); aiBubble = null; }
+        restoreMicBtn();
+        setStatus(listening ? 'Listening… speak now' : 'Click the mic to start', listening ? 'active' : '');
+        break;
+
+      case 'session_end':
+        // Deepgram closed with nothing pending — clean up if AI isn't running
+        if (pendingClose && !aiPending) {
+          pendingClose = false;
+          if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); ws = null; }
+          micBtn.textContent = '🎙️';
           micBtn.disabled = false;
           setStatus('Click the mic to start');
         }
@@ -189,7 +221,7 @@ registerProcessor('pcm-capture', PcmCapture);
     setStatus('Listening… speak now', 'active');
   }
 
-  // Called when user clicks stop — stops audio only, keeps WS open if AI is responding
+  // Stops audio hardware only; keeps WS open if AI is still responding
   function stopMicOnly() {
     listening = false;
 
@@ -199,10 +231,8 @@ registerProcessor('pcm-capture', PcmCapture);
     if (micStream)   { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
 
     micBtn.classList.remove('listening');
-    micBtn.textContent = '🎙️';
     document.getElementById('micWrapper').classList.remove('listening-active');
 
-    // If interim text is showing, send it as a message before stopping
     const pendingText = interimEl.textContent.trim();
     interimEl.style.display = 'none';
     interimEl.textContent = '';
@@ -211,19 +241,30 @@ registerProcessor('pcm-capture', PcmCapture);
       ws.send(JSON.stringify({ type: 'force_send', text: pendingText }));
     }
 
-    if (aiPending || pendingText) {
-      // Keep WS open so AI can finish; close after ai_done
+    if (aiPending) {
+      // AI already generating — button is already 🛑, just flag to close after done
       pendingClose = true;
+    } else if (pendingText) {
+      // force_send just sent — briefly disable until ai_start arrives and sets 🛑
+      pendingClose = true;
+      micBtn.textContent = '🎙️';
       micBtn.disabled = true;
       setStatus('AI is responding…');
+    } else if (ws && ws.readyState === WebSocket.OPEN) {
+      // No interim text — ask Deepgram to flush any buffered audio as a final
+      ws.send(JSON.stringify({ type: 'close_deepgram' }));
+      pendingClose = true;
+      micBtn.textContent = '🎙️';
+      micBtn.disabled = true;
+      setStatus('Processing…');
     } else {
-      if (ws && ws.readyState === WebSocket.OPEN) { ws.close(); ws = null; }
+      micBtn.textContent = '🎙️';
       micBtn.disabled = false;
       setStatus('Click the mic to start');
     }
   }
 
-  // Full teardown — used on errors and page unload
+  // Full teardown — used on errors
   function stopRecording() {
     listening = false;
     aiPending = false;
@@ -237,14 +278,30 @@ registerProcessor('pcm-capture', PcmCapture);
 
     micBtn.classList.remove('listening');
     micBtn.textContent = '🎙️';
+    micBtn.title = 'Start / Stop recording';
     micBtn.disabled = false;
     document.getElementById('micWrapper').classList.remove('listening-active');
     interimEl.style.display = 'none';
     interimEl.textContent = '';
+    aiBubble = null;
     setStatus('Click the mic to start');
   }
 
   micBtn.addEventListener('click', () => {
-    if (listening) stopMicOnly(); else startRecording();
+    if (aiPending) {
+      // Reset UI immediately — don't wait for server round-trip
+      aiPending = false;
+      pendingClose = false;
+      if (aiBubble) { aiBubble.classList.remove('streaming'); aiBubble = null; }
+      restoreMicBtn();
+      setStatus(listening ? 'Listening… speak now' : 'Click the mic to start', listening ? 'active' : '');
+      // Tell server to abort Ollama
+      if (ws && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: 'interrupt' }));
+    } else if (listening) {
+      stopMicOnly();
+    } else {
+      startRecording();
+    }
   });
 })();

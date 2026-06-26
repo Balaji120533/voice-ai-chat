@@ -65,17 +65,17 @@ function encodeToon(msgs) {
   return `messages[${msgs.length}]{role,content}:\n${rows.join('\n')}`;
 }
 
-// Ask Ollama and stream the reply back to the browser
-function askOllama(clientWs, history, userText) {
+// Ask Ollama and stream the reply back to the browser.
+// setAbort(fn) is called with an abort function once the HTTP request is open;
+// called with null when the request ends normally.
+function askOllama(clientWs, history, userText, setAbort) {
   return new Promise((resolve) => {
     try {
-      // Convert chat history from Gemini format → Ollama format
       const ollamaHistory = history.map(h => ({
         role: h.role === 'model' ? 'assistant' : 'user',
         content: h.parts[0].text,
       }));
 
-      // If there is prior history, encode it as TOON to reduce context tokens
       let messages;
       if (ollamaHistory.length >= 2) {
         const toon = encodeToon(ollamaHistory);
@@ -88,6 +88,7 @@ function askOllama(clientWs, history, userText) {
       }
 
       const body = JSON.stringify({ model: OLLAMA_MODEL, messages, stream: true });
+      let aborted = false;
 
       const req = http.request(
         { hostname: 'localhost', port: 11434, path: '/api/chat', method: 'POST',
@@ -97,6 +98,7 @@ function askOllama(clientWs, history, userText) {
             let errText = '';
             res.on('data', d => errText += d);
             res.on('end', () => {
+              setAbort(null);
               const msg = `Ollama ${res.statusCode}: ${errText}`;
               console.error(msg);
               if (clientWs.readyState === WebSocket.OPEN)
@@ -111,10 +113,11 @@ function askOllama(clientWs, history, userText) {
           clientWs.send(JSON.stringify({ type: 'ai_start' }));
 
           res.on('data', (chunk) => {
+            if (aborted) return;
             buffer += chunk.toString();
             const lines = buffer.split('\n');
-            buffer = lines.pop(); // keep incomplete last line
-                                                                                                     
+            buffer = lines.pop();
+
             for (const line of lines) {
               if (!line.trim()) continue;
               try {
@@ -130,6 +133,8 @@ function askOllama(clientWs, history, userText) {
           });
 
           res.on('end', () => {
+            if (aborted) return;
+            setAbort(null);
             if (clientWs.readyState === WebSocket.OPEN)
               clientWs.send(JSON.stringify({ type: 'ai_done', full: fullReply }));
             resolve(fullReply || null);
@@ -138,14 +143,26 @@ function askOllama(clientWs, history, userText) {
       );
 
       req.on('error', (err) => {
+        setAbort(null);
+        if (aborted) {
+          // Intentional abort — tell browser generation stopped
+          if (clientWs.readyState === WebSocket.OPEN)
+            clientWs.send(JSON.stringify({ type: 'ai_stopped' }));
+          resolve(null);
+          return;
+        }
         console.error('Ollama error:', err.message);
         if (clientWs.readyState === WebSocket.OPEN)
           clientWs.send(JSON.stringify({ type: 'error', message: 'Ollama error: ' + err.message }));
         resolve(null);
       });
+
+      // Expose abort so the connection handler can call it on interrupt/disconnect
+      setAbort(() => { aborted = true; req.destroy(); });
       req.write(body);
       req.end();
     } catch (err) {
+      setAbort(null);
       console.error('Ollama error:', err.message);
       if (clientWs.readyState === WebSocket.OPEN)
         clientWs.send(JSON.stringify({ type: 'error', message: 'Ollama error: ' + err.message }));
@@ -154,14 +171,15 @@ function askOllama(clientWs, history, userText) {
   });
 }
 
-// WebSocket proxy: browser <-> Deepgram, with Gemini chat
+// WebSocket proxy: browser <-> Deepgram, with Ollama chat
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 wss.on('connection', (clientWs) => {
   console.log('Browser connected — opening Deepgram stream');
 
-  // Conversation history for this session
   const chatHistory = [];
+  let abortOllama = null;
+  const setAbort = (fn) => { abortOllama = fn; };
 
   const dgWs = new WebSocket(DG_URL, { headers: { Authorization: 'Token ' + DEEPGRAM_API_KEY } });
 
@@ -186,18 +204,13 @@ wss.on('connection', (clientWs) => {
     if (!text || !text.trim()) return;
 
     if (msg.is_final) {
-      // Send user message to browser
+      // Abort any in-progress Ollama call before starting a new one
+      if (abortOllama) { abortOllama(); abortOllama = null; }
       clientWs.send(JSON.stringify({ type: 'user_message', text }));
-
-      // Add to history and ask Ollama
       chatHistory.push({ role: 'user', parts: [{ text }] });
-      const reply = await askOllama(clientWs, chatHistory.slice(0, -1), text);
-
-      if (reply) {
-        chatHistory.push({ role: 'model', parts: [{ text: reply }] });
-      }
+      const reply = await askOllama(clientWs, chatHistory.slice(0, -1), text, setAbort);
+      if (reply) chatHistory.push({ role: 'model', parts: [{ text: reply }] });
     } else {
-      // Interim result — show as typing indicator
       clientWs.send(JSON.stringify({ type: 'interim', text }));
     }
   });
@@ -205,32 +218,38 @@ wss.on('connection', (clientWs) => {
   // Forward browser audio → Deepgram; handle JSON control messages
   clientWs.on('message', async (data, isBinary) => {
     if (!isBinary) {
-      // Text frame = JSON control message from browser
       try {
         const msg = JSON.parse(data.toString());
         if (msg.type === 'force_send' && msg.text) {
-          // User stopped mic with pending interim text — treat as final transcript
           clientWs.send(JSON.stringify({ type: 'user_message', text: msg.text }));
           chatHistory.push({ role: 'user', parts: [{ text: msg.text }] });
-          const reply = await askOllama(clientWs, chatHistory.slice(0, -1), msg.text);
+          const reply = await askOllama(clientWs, chatHistory.slice(0, -1), msg.text, setAbort);
           if (reply) chatHistory.push({ role: 'model', parts: [{ text: reply }] });
+        } else if (msg.type === 'interrupt') {
+          // User clicked mic during generation — abort Ollama immediately
+          if (abortOllama) { abortOllama(); abortOllama = null; }
+        } else if (msg.type === 'close_deepgram') {
+          // Mic stopped with no interim text — flush any buffered audio via CloseStream
+          if (dgWs.readyState === WebSocket.OPEN)
+            dgWs.send(JSON.stringify({ type: 'CloseStream' }));
         }
       } catch { /* ignore unknown text frames */ }
       return;
     }
-    // Binary frame = audio PCM → forward to Deepgram
     if (dgWs.readyState === WebSocket.OPEN) dgWs.send(data);
   });
 
   clientWs.on('close', () => {
     console.log('Browser disconnected');
     if (dgWs.readyState === WebSocket.OPEN) dgWs.close();
+    if (abortOllama) { abortOllama(); abortOllama = null; }
   });
 
   dgWs.on('close', () => {
-    // Deepgram closed (e.g. mic stopped) — don't force-close client;
-    // it will close itself after the AI finishes responding.
     console.log('Deepgram stream closed');
+    // If no AI call is running, tell the browser nothing is pending so it can clean up
+    if (!abortOllama && clientWs.readyState === WebSocket.OPEN)
+      clientWs.send(JSON.stringify({ type: 'session_end' }));
   });
 
   dgWs.on('error', (err) => {
